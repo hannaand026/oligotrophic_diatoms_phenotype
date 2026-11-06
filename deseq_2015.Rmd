@@ -1,0 +1,95 @@
+---
+title: "deseq_2015"
+author: "Hanna Anderson"
+date: "2026-10-17"
+output: html_document
+---
+# read in packages
+```{r}
+library(rlang)
+library(tibble)
+library(tidyr)
+library(dplyr)
+library(viridis)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(pheatmap)
+library(RColorBrewer)
+library(data.table)
+library(DESeq2)
+library(vegan)
+library(ggforce)
+
+```
+
+# DESeq code sample-- comparing Cylindrotheca in t=0 to N-amended end members
+```{r}
+# read in raw count data for whole assembly (available on Zenodo)
+setwd("your_local_path")
+read.csv("all_2015_tax_euk_egg_numreads.csv")
+
+# make df for DEseq
+deseq_cylindro_df <- all_2015_tax_euk_egg_numreads %>%
+  filter(if_any(everything(), ~ grepl("Cylindrotheca", ., ignore.case = TRUE))) %>% # there should be 13820 unique cylindro contigs
+  dplyr::select(c(1,51:70)) %>% #only keep contig ID and amendment columns
+  rename_with(~ sub("^.", "", .), starts_with("X")) %>% #remove the extra 'X' from data columns
+  filter(!is.na(Contig_ID)) %>%
+  group_by(Contig_ID) %>%  # Group by the column of interest
+  filter(row_number()==1) %>% # make sure there are no duplicate contigs
+  ungroup() %>% 
+  remove_rownames() %>%
+  column_to_rownames('Contig_ID')
+
+deseq_cylindro_df_test <- deseq_cylindro_df %>%
+    filter(!if_all(c(1:20), ~ . <= 1)) #remove any contigs with less than 1 across all samples -- ran this as a test through deseq, got the same number of DE genes
+
+# make column metadata file for DESeq
+Col_d <- data.frame(c(rep("2pm_R",3), rep("minus_N", 2), rep("control", 3), rep("DSW", 3), rep("plus_P", 3), rep("plus_N", 3), rep("minus_P", 3)))
+col.names <- c('2pm_R1_7_26','2pm_R2_7_26','2pm_R3_7_26','minus_N_2','minus_N_3','control_1','control_2','control_3','DSW_1','DSW_2','DSW_3','plus_P_1','plus_P_2','plus_P_3','plus_N_1','plus_N_2','plus_N_3','minus_P_1','minus_P_2','minus_P_3')
+colnames(Col_d)[1] = "Treatment"
+rownames(Col_d) <- col.names
+Col_d$Treatment <- as.factor(Col_d$Treatment)
+
+# Making the DDS files for DESeq
+deseq_cylindro_df_dds <- DESeqDataSetFromMatrix(countData = round(deseq_cylindro_df),
+                              colData = Col_d,
+                              design = ~ Treatment)
+
+# create dds for running DESeq
+deseq_cylindro_df_dds_3 <- DESeq2::estimateSizeFactors(deseq_cylindro_df_dds, type="ratio")
+deseq_cylindro_df_dds_2 <- DESeq2::estimateDispersions(deseq_cylindro_df_dds_3)
+deseq_cylindro_df_dds_1 <- nbinomWaldTest(deseq_cylindro_df_dds_2)
+resultsNames(deseq_cylindro_df_dds_1)
+
+# in situ vs plus N DESeq run
+cylindro_insitu_plus_N <- results(deseq_cylindro_df_dds_1, c("Treatment", "2pm_R", "plus_N"))
+cylindro_insitu_plus_N_df <- cylindro_insitu_plus_N %>%
+  as.data.frame()  %>%
+  tibble::rownames_to_column("Contig_ID") %>% # make the row names (which are the gene names) into column 1
+  select(c(1,3,7)) %>% # only keep the results you need
+  rename_with(.fn = ~ paste0(.x, "_insitu_vs_plus_N"), .cols = c(2:3)) #rename the results by comparison
+
+# in situ vs minus_P DESeq run
+cylindro_insitu_minus_P <- results(deseq_cylindro_df_dds_1, c("Treatment", "2pm_R", "minus_P"))
+cylindro_insitu_minus_P_df <- cylindro_insitu_minus_P %>%
+  as.data.frame()  %>%
+  tibble::rownames_to_column("Contig_ID") %>%
+  select(c(1,3,7)) %>%
+  rename_with(.fn = ~ paste0(.x, "_insitu_vs_minus_P"), .cols = c(2:3))
+
+# in situ vs DSW DESeq run
+cylindro_insitu_DSW <- results(deseq_cylindro_df_dds_1, c("Treatment", "2pm_R", "DSW"))
+cylindro_insitu_DSW_df <- cylindro_insitu_DSW %>%
+  as.data.frame()  %>%
+  tibble::rownames_to_column("Contig_ID") %>%
+  select(c(1,3,7)) %>%
+  rename_with(.fn = ~ paste0(.x, "_insitu_vs_DSW"), .cols = c(2:3))
+
+# make a df with all results to look through
+cylindro_insitu_deseq <- cylindro_insitu_plus_N_df %>%
+  left_join(cylindro_insitu_minus_P_df, by = "Contig_ID") %>%
+  left_join(cylindro_insitu_DSW_df, by = "Contig_ID")
+
+```

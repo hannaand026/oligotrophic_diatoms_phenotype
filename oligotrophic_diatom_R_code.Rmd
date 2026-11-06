@@ -1,0 +1,564 @@
+---
+title: "oligotrophic_diatom_R_code"
+author: "Hanna Anderson"
+date: "2026-10-15"
+output: html_document
+---
+
+# read in packages
+```{r}
+library(rlang)
+library(tibble)
+library(tidyr)
+library(dplyr)
+library(viridis)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(pheatmap)
+library(RColorBrewer)
+library(data.table)
+library(DESeq2)
+library(vegan)
+library(ggforce)
+library(ggVennDiagram)
+
+```
+
+# Donut plots using sortmerna data
+```{r}
+#read in Table S3 from the Supplemental tables
+setwd("your_local_path")
+sortme2015 <- read.csv()
+sortme2015 <- sortme2015[, -c(1)]
+
+# subset at the Class level -- doing it at phylum level introduces variability in dinos
+sort_amend <- sortme2015 %>%
+  select(c(2,39:57)) %>%
+    dplyr::mutate_if(is.integer, as.numeric) %>%
+  replace(is.na(.), 0) %>%
+  mutate(Taxon = str_remove(Taxon, ";$")) %>% #remove hanging extra ';' from end of some taxon rows
+  mutate(max_annot = str_extract(Taxon, "[^;]+$")) %>% #create a column with highest taxonomic annotation
+  rename_with(~ sub("^.", "", .), starts_with("X")) %>% #remove the extra 'X' from data columns
+  separate(Taxon, into = c("domain","supergroup","division","class","order","family","genus","species"), sep = ";", fill = "right") %>%
+  mutate(domain = str_remove(domain, ":.*")) %>% #remove last hanging characters from domain names
+  mutate(supergroup = str_remove(supergroup, ":.*")) %>%
+  mutate(division = str_remove(division, ":.*")) %>%
+  mutate(class = str_remove(class, ":.*")) %>%
+  mutate(order = str_remove(order, ":.*")) %>%
+  mutate(family = str_remove(family, ":.*")) %>%
+  mutate(genus = str_remove(genus, ":.*")) %>%
+  mutate(species = str_remove(species, ":.*")) 
+
+# make your categories
+sort_amend_donuts <- sort_amend %>% 
+  filter(domain == "Eukaryota") %>%
+  filter(!division == "Metazoa") %>%
+  mutate(Identifier = case_when(
+    division == "Haptophyta" ~ "Haptophyta",
+            grepl("Cylindrotheca", max_annot) ~ "Cylindrotheca",  # use this line for cylindrotheca plot
+    class == "Bacillariophyta" ~ "Diatomea",
+    division == "Dinoflagellata" ~ "Dinoflagellata",
+    TRUE ~ "Other"
+))
+  
+donuts_2015_1 <- sort_amend_donuts %>%
+ # filter(!Identifier == "Dinoflagellata") %>% # this line removes the dinoflagellates if you want
+  dplyr::rename("insitu_R1" = "2pm_R1_7_26") %>%
+  dplyr::rename("insitu_R2" = "2pm_R2_7_26") %>%
+  dplyr::rename("insitu_R3" = "2pm_R3_7_26") %>%
+   mutate(
+    insitu   = rowMeans(select(., starts_with("insitu")), na.rm = TRUE),
+    control  = rowMeans(select(., starts_with("control")), na.rm = TRUE),
+    minus_P  = rowMeans(select(., starts_with("minus_P")), na.rm = TRUE),
+    minus_N  = rowMeans(select(., starts_with("minus_N")), na.rm = TRUE),
+    plus_P   = rowMeans(select(., starts_with("plus_P")), na.rm = TRUE),
+    plus_N   = rowMeans(select(., starts_with("plus_N")), na.rm = TRUE),
+    DSW      = rowMeans(select(., starts_with("DSW")), na.rm = TRUE)
+  ) %>%
+  select(c(29:36)) %>% #get rid of replicate columns
+  dplyr::group_by(Identifier) %>%
+  dplyr::mutate(across(1:7, ~ sum(.))) %>% #sum OTU by identifiers
+  filter(row_number()==1) %>%
+  ungroup() %>% #always remember to ungroup folks 
+  reshape2::melt(id.vars = 'Identifier', variable.name = 'Sample', value.name = 'rRNA')
+
+donuts_2015_1$Identifier <- factor(donuts_2015_1$Identifier, levels = c("Diatomea","Cylindrotheca","Dinoflagellata","Haptophyta","Other"))
+
+donuts_2015_2 <- donuts_2015_1 %>%
+  dplyr::group_by(Sample) %>%
+  dplyr::mutate(sum_rRNA =sum(rRNA)) %>% 
+  dplyr::mutate(percent = round(rRNA/sum_rRNA,3)*100) %>% # get as percentage of total
+  dplyr::mutate(Treatment = gsub('_[^_]*$', '', Sample)) %>% # clean up labels
+  ungroup()
+
+colors_5 <- c("#da4167","#da4167","#A63A00","#CCBF3F","#E0E0E0")  # define colors
+
+pattern_cols <- c("Bacillariophyta"="none","Cylindrotheca"="stripe","Haptista"="none","Dinoflagellata"="none","Other"="none") # define pattern layover
+
+# make donuts
+donut1 <- ggplot(donuts_2015_2[order(donuts_2015_2$Identifier,decreasing=F),], aes(x=2, y=percent, fill=Identifier, group = Sample, pattern = Identifier)) +
+    geom_col_pattern(colour = "black", 
+    pattern_density = 0.3,
+    pattern_spacing = 0.035,
+    pattern_angle = -45,
+    pattern_fill = "black") + 
+  facet_wrap(Sample ~ Treatment) + 
+  coord_polar("y", start=0) +
+  scale_fill_manual(values=colors_5) +
+  scale_pattern_manual(values = pattern_cols) +
+  theme_void() +
+  labs(fill="Phylum", title="Percent rRNA per phylum") +
+  theme(plot.title = element_text(hjust = 0.25), legend.text = element_text(size=12), legend.title = element_text(size=12)) +
+  xlim(.2,2.5)
+
+donut1
+
+```
+
+# CA plot for Cylindrotheca only, can alter to make other CAs
+```{r}
+# can vary the input file and subsetting to make all CAs in the manuscript and supplement
+
+#read in Table S4 from the Supplemental tables
+setwd("your_local_path")
+cylindro_all <- read.csv()
+cylindro_all <- cylindro_all[, -c(1)]
+
+cylindro_all_1 <- cylindro_all %>%  
+  rename_with(~ sub("^.", "", .), starts_with("X")) %>% #remove the extra 'X' from data columns
+  select(c(1,18:20,26:28,34:36,41:52,58:60,64:69)) %>% # only 2pms and amendments
+  remove_rownames() %>%
+  column_to_rownames("Contig_ID") %>%
+  replace(is.na(.), 0) %>%
+  rowwise() %>% #activate rowwise!
+ # filter(sum(c_across(everything()) == 0) < 15) %>% #look across columns, if there are more than 15 zeros, get rid of it. this gets rid of any contigs in less than half of samples
+  ungroup() %>%
+  as.matrix() %>%
+  t() %>%
+  as.data.frame()
+
+# code for a CA
+sol <- cca(cylindro_all_1)
+scrs <- as.data.frame(scores(sol, display="sites"))
+scrs_2 <- scrs %>%
+  rownames_to_column("Sample") %>%
+  mutate(
+    date = case_when(
+      grepl("7_26", Sample) ~ "7-26",
+      grepl("7_27", Sample) ~ "7-27",
+      grepl("7_28", Sample) ~ "7-28",
+      grepl("7_29", Sample) ~ "7-29",
+      grepl("7_30", Sample) ~ "7-30",
+      grepl("8_1", Sample) ~ "8-1",
+      grepl("8_2", Sample) ~ "8-2",
+      grepl("8_3", Sample) ~ "8-3",
+      grepl("DSW", Sample) ~ "DSW",
+      grepl("plus_N", Sample) ~ "Plus N",
+      grepl("minus_P", Sample) ~ "Minus P",
+      grepl("plus_P", Sample) ~ "Plus P",
+      grepl("minus_N", Sample) ~ "Minus N",
+      TRUE ~ "Amendment"  # Default case if none of the above match
+    )) %>%
+  mutate(
+    type = case_when(
+      grepl("control", Sample) ~ "Control",
+      grepl("DSW", Sample) ~ "DSW",
+      grepl("plus_P", Sample) ~ "Plus P",
+      grepl("plus_N", Sample) ~ "Plus N",
+      grepl("minus_N", Sample) ~ "Minus N",
+      grepl("minus_P", Sample) ~ "Minus P",
+      grepl("2pm", Sample) ~ "in situ",
+      grepl("2am", Sample) ~ "2am",
+      grepl("10am", Sample) ~ "10am",
+      grepl("10pm", Sample) ~ "10pm",
+      grepl("6pm", Sample) ~ "6pm",
+      grepl("6am", Sample) ~ "6am",
+      TRUE ~ "other"
+    ))
+
+ca <- ggplot(scrs_2) +
+  geom_point(mapping = aes(x=CA1, y=CA2, color = date, shape = type), size = 7, stroke = 1.75) +
+  coord_fixed() +
+  geom_hline(yintercept=0, color="grey", linetype="dashed") +
+  geom_vline(xintercept=0, color="grey", linetype="dashed") +
+  scale_shape_manual(values = c(22 ,21, 23, 24, 4, 25)) +  # Manually set shapes for each category
+  scale_color_manual(values = col10) +
+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.title = element_text(size=20), axis.text = element_text(size=18) ) +
+  guides()
+
+```
+
+# venn diagram output for significantly DE genes for Cylindrotheca
+```{r}
+#read in Table S6 from the Supplemental tables
+setwd("your_local_path")
+cylindro_deseq <- read.csv()
+cylindro_deseq <- cylindro_deseq[, -c(1)]
+
+#make a df where we can see all contigs that were significant for cylindrotheca
+cylindro_deseq <- cylindro_deseq %>%
+  filter(if_any(c(padj_before_vs_after, padj_7_29_vs_8_1), ~ .x < 0.05)) %>% #keep all rows where ANY pvalue was signficant-- should be 68
+  dplyr::select(c(1,100,102)) %>%
+  filter(!is.na(padj_7_29_vs_8_1))
+
+
+# create vectors of contigs that are significant in each comparison
+cylindro_insitu_vs_plus_N_list <- cylindro_deseq[cylindro_deseq$padj_insitu_vs_plus_N <= 0.05, "Contig_ID"] #should be 46
+cylindro_insitu_vs_minus_P_list <- cylindro_deseq[cylindro_deseq$padj_insitu_vs_minus_P <= 0.05, "Contig_ID"] #should be 68
+cylindro_insitu_vs_DSW_list <- cylindro_deseq[cylindro_deseq$padj_insitu_vs_DSW <= 0.05, "Contig_ID"] #should be 70
+cylindro_before_after_list <- cylindro_deseq[cylindro_deseq$padj_before_vs_after <= 0.05, "Contig_ID"] #should be 68
+
+input_cylindro_combined <- list(cylindro_7_29_vs_8_1_list=cylindro_7_29_vs_8_1_list,
+                       cylindro_insitu_vs_plus_N_list=cylindro_insitu_vs_plus_N_list, 
+                       cylindro_insitu_vs_minus_P_list=cylindro_insitu_vs_minus_P_list, 
+                       cylindro_insitu_vs_DSW_list=cylindro_insitu_vs_DSW_list)
+
+venn <- ggVennDiagram(input_cylindro_combined, edge_size = 1, 
+                      category.names = c("7_29_vs_8_1","In situ vs. \nPlus N","In situ vs. \nMinus P","In situ vs. \nDSW"), label_alpha = 0, set_size = 7, label_size = 7, set_color = "black") +
+  #scale_fill_gradient(low = "#e6e6e6", high = "#666666") +  
+  scale_fill_gradient(low = "#DDF9C1", high = "#587D78") +  
+
+  labs(fill="Number of \ndifferentially expressed \ncontigs") +
+  scale_x_continuous(expand = expansion(mult = .2)) 
+
+print(venn)
+
+```
+
+# heatmap for significantly DE genes for cylindrotheca
+```{r}
+#read in Table S6 from the Supplemental tables
+setwd("your_local_path")
+cylindro_deseq <- read.csv()
+cylindro_deseq <- cylindro_deseq[, -c(1)]
+
+#use this chunk for only DESeq significa t genes in any +N treatment
+cylindro_transition_amendments_deseq_1 <- cylindro_transition_amendments_deseq %>%
+  mutate(N_signif = if_else(if_any(c(padj_insitu_vs_plus_N, padj_insitu_vs_minus_P, padj_insitu_vs_DSW, padj_before_vs_after), ~ .x < 0.05), "Signif", "Non_signif")) %>% #make column indicating if contig was signif DE in and N amendment-- should be 79
+  filter(N_signif == "Signif") %>%
+  mutate(across(c(padj_insitu_vs_plus_N, padj_insitu_vs_minus_P, padj_insitu_vs_DSW, padj_before_vs_after), ~replace_na(., 1))) %>% # replace NA with 1 so these values can be filtered out
+    mutate(Signif_category = case_when(
+     padj_before_vs_after > 0.05 & (padj_insitu_vs_DSW < 0.05 | padj_insitu_vs_minus_P < 0.05 | padj_insitu_vs_plus_N < 0.05) ~ "Incubations only",
+    padj_insitu_vs_DSW > 0.05 & padj_insitu_vs_minus_P > 0.05 & padj_insitu_vs_plus_N > 0.05 & padj_before_vs_after < 0.05 ~ "In situ transition only",
+    TRUE ~ "Incubations and in situ transition"
+  )) %>%
+  # regulation pattern in significant cases
+      mutate(Regulation_pattern = case_when(
+    Signif_category == "Incubations only" & log2FoldChange_insitu_vs_DSW > 0 & log2FoldChange_insitu_vs_minus_P > 0 & log2FoldChange_insitu_vs_plus_N > 0  ~ "Downregulated",
+    Signif_category == "Incubations only" & log2FoldChange_insitu_vs_DSW < 0 & log2FoldChange_insitu_vs_minus_P < 0 & log2FoldChange_insitu_vs_plus_N < 0  ~ "Upregulated",
+    Signif_category == "In situ transition only" & log2FoldChange_before_vs_after < 0   ~ "Upregulated",
+    Signif_category == "" & log2FoldChange_before_vs_after > 0   ~ "Downregulated",
+    Signif_category == "Incubations and in situ transition" & log2FoldChange_insitu_vs_minus_P < 0 & log2FoldChange_insitu_vs_plus_N < 0  ~ "Upregulated",
+    TRUE ~ "Uncertain"
+  ))
+
+cyl_signif_only <- cylindro_transition_amendments_deseq %>%
+      filter(padj_before_vs_after < 0.05 | padj_insitu_vs_DSW < 0.05 | padj_insitu_vs_minus_P < 0.05 | padj_insitu_vs_plus_N < 0.05)
+
+write.csv(cyl_signif_only, 'C:/Users/hanna/OneDrive/Desktop/DEES/2015_amendment_assembly/cyl_signif_only.csv' )
+
+
+test <- cylindro_transition_amendments_deseq_1 %>%
+  filter(Regulation_pattern == "Uncertain")
+
+cylindro_transition_amendments_deseq_2 <- cylindro_transition_amendments_deseq_1 %>%
+  dplyr::rename_with(~ sub("^.", "", .), starts_with("X")) %>% #remove the extra 'X' from data columns
+      dplyr::mutate("7_26_2pm" = rowMeans(.[, 50:52], na.rm = T)) %>%
+      dplyr::mutate("7_27_2pm" = rowMeans(.[, 18:20], na.rm = T)) %>%
+      dplyr::mutate("7_28_2pm" = rowMeans(.[, 26:28], na.rm = T)) %>%
+      dplyr::mutate("7_29_2pm" = rowMeans(.[, 34:36], na.rm = T)) %>%
+      dplyr::mutate("8_1_2pm" = rowMeans(.[, 41:43], na.rm = T)) %>%
+      dplyr::mutate("8_2_2pm" = rowMeans(.[, 44:46], na.rm = T)) %>%
+      dplyr::mutate("8_3_2pm" = rowMeans(.[, 47:49], na.rm = T)) %>%
+  dplyr::mutate(
+    control = rowMeans(across(starts_with("control")), na.rm = TRUE),
+    minus_P = rowMeans(across(starts_with("minus_P")), na.rm = TRUE),
+    minus_N = rowMeans(across(starts_with("minus_N")), na.rm = TRUE),
+    plus_P  = rowMeans(across(starts_with("plus_P")),  na.rm = TRUE),
+    plus_N  = rowMeans(across(starts_with("plus_N")),  na.rm = TRUE),
+    DSW     = rowMeans(across(starts_with("DSW")),     na.rm = TRUE)
+    ) %>%
+  dplyr::select(-c(2:13,18:20,26:28,34:36,41:79,83:105)) %>%
+  relocate("7_26_2pm", .after = 1) %>%
+  relocate("7_27_2pm", .after = "10am_7_27") %>%
+  relocate("7_28_2pm", .after = "10am_7_28") %>%
+  relocate("7_29_2pm", .after = "10am_7_29") %>%
+  relocate(c("8_1_2pm","8_2_2pm","8_3_2pm"), .after = "6am_7_30") %>%
+  relocate(c("KEGG_ko","KEGG_Pathway","KEGG_Module","Signif_category","Regulation_pattern"), .after = "DSW") %>%
+  mutate(across(where(is.character), ~na_if(., "-"))) #change all '-' to NA
+
+write.csv(cylindro_transition_amendments_deseq_2, 'C:/Users/hanna/OneDrive/Desktop/DEES/2015_amendment_assembly/cylindro_transition_amendments_deseq_2.csv')
+
+cylindro_transition_amendments_deseq_3 <- cylindro_transition_amendments_deseq_2 %>%
+  column_to_rownames(var = 'Contig_ID') %>%
+  dplyr::select(c(1,6,12,18,23:25)) #only 2pms
+
+# z score function
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x) }
+
+
+cylindro_transition_deseq_z <- t(apply(cylindro_transition_amendments_deseq_3[1:7], 1, cal_z_score)) # normalize by z-score
+
+signif_ann <- cylindro_transition_amendments_deseq_2 %>% #make row annotations by significance category
+  dplyr::select(1,40:41) %>%
+  column_to_rownames("Contig_ID")
+
+cylindro_transition_deseq_z <- cylindro_transition_deseq_z %>%
+  as.data.frame() %>%
+  na.omit() %>% #remove NAs that were generated from using z score (some were divided by zero)
+  as.matrix() #make it a matrix
+
+labs.row <- rownames(cylindro_transition_deseq_z) # create a vector of row names
+
+ann_colors = list(Signif_category = c("Incubations only" = "#254D32", 
+                                "In situ transition only" = "#7FB685", 
+                                "Incubations and in situ transition" = "#FFD131"),         
+                  Regulation_pattern = c("Upregulated" = "#882255", 
+                                   "Downregulated" = "#88CCEE"))
+
+#Specify colors for annotations: heatmap  cylindro genes significant only
+cyl_deseq_heatmap <- pheatmap(cylindro_transition_deseq_z, 
+                       labels_row = labs.row, 
+                       annotation_row = signif_ann, 
+                      color=colorRampPalette(c("#EED4FA","#8429C1","#30044E"))(200), 
+                       annotation_colors = ann_colors,
+                       cluster_cols = FALSE, 
+                       cluster_rows = TRUE)
+
+```
+
+# radar plot code for Cylindrotheca
+```{r}
+#read in Table S4 from the Supplemental tables
+cylindro_all <- read.csv()
+cylindro_all <- cylindro_all[, -c(1)]
+
+cylindro_all_1 <- cylindro_all %>%  
+  rename_with(~ sub("^.", "", .), starts_with("X")) %>% #remove the extra 'X' from data columns
+  select(c(1,18:20,26:28,34:36,41:49,50:52,58:60,64:69,80:82))  # only in situ, N amendments and kegg IDs
+
+# this is a master table of KEGG hierarchy to link KEGG IDs to modules/submodules. It can be downloaded frmo Zenodo
+setwd("your_local_path")
+KEGG_hierarchy_table <- read.csv('KEGG_hierarchy_table.csv')
+
+# this is a simplified version we will use later
+kegg_simple <- KEGG_hierarchy_table %>%
+  dplyr::select(c(5:6)) %>%
+  group_by(Submodule1,Submodule2) %>%
+  filter(row_number()==1) %>% #keep only one row for each unique ID
+  ungroup()
+
+```
+
+# cylindrotheca-- building a df for comparison of kegg id stuff
+```{r}
+cylindro_greedy <- cylindro_full_1 %>% #13820 obvs
+  filter(!is.na(KEGG_ko)) %>% #filter for only things with KEGG mod IDs
+  filter(!(KEGG_ko == "-")) %>% #filter for only things with KEGG mod IDs 
+  separate_rows(KEGG_ko, sep = ",")  #duplicate rows with multiple KEGG module IDs -- gives you 5018 rows
+  left_join(KEGG_hierarchy_table, by = "KEGG_ko") %>%  # nadd 
+  select(-c(KEGG_Pathway,KEGG_Module)) #remove kegg ID columns from before the merge
+
+# Reclassified 'Metabolic capacity' into 'metabolism' module for simplicity, instead of it being its own 'genotypic signature' module
+
+col_names <- c("Contig_ID","2pm_7_27_R1","2pm_7_27_R2","2pm_7_27_R3","2pm_7_28_R1","2pm_7_28_R2","2pm_7_28_R3","2pm_7_29_R1","2pm_7_29_R2","2pm_7_29_R3","2pm_8_1_R1","2pm_8_1_R2","2pm_8_1_R3","2pm_8_2_R1","2pm_8_2_R2","2pm_8_2_R3","2pm_8_3_R1","2pm_8_3_R2","2pm_8_3_R3","2pm_7_26_R1","2pm_7_26_R2","2pm_7_26_R3","DSW_1","DSW_2","DSW_3","plus_N_1","plus_N_2","plus_N_3","minus_P_1","minus_P_2","minus_P_3","KEGG_ko","KeggID","Kegg.Definition","Module.ID","Module.Definition","Submodule1","Submodule2","SuperModule")
+
+colnames(cylindro_greedy) = col_names
+
+cylindro_greedy_sum <- cylindro_greedy %>% #adding module signals together
+    mutate(
+    insitu_7_26  = rowMeans(select(., starts_with("2pm_7_26")), na.rm = TRUE),
+    insitu_7_27  = rowMeans(select(., starts_with("2pm_7_27")), na.rm = TRUE),
+    insitu_7_28  = rowMeans(select(., starts_with("2pm_7_28")), na.rm = TRUE),
+    insitu_7_29  = rowMeans(select(., starts_with("2pm_7_29")), na.rm = TRUE),
+    insitu_8_1  = rowMeans(select(., starts_with("2pm_8_1")), na.rm = TRUE),
+    insitu_8_2  = rowMeans(select(., starts_with("2pm_8_2")), na.rm = TRUE),
+    insitu_8_3  = rowMeans(select(., starts_with("2pm_8_3")), na.rm = TRUE),
+    DSW  = rowMeans(select(., starts_with("DSW")), na.rm = TRUE),
+    plus_N  = rowMeans(select(., starts_with("plus_N")), na.rm = TRUE),
+    minus_P   = rowMeans(select(., starts_with("minus_P")), na.rm = TRUE)) %>%
+  mutate(
+    insitu_before = rowMeans(select(., starts_with("insitu_7_")), na.rm = TRUE),
+    insitu_after = rowMeans(select(., starts_with("insitu_8_")), na.rm = TRUE)
+  ) %>%
+  select(c(37,40,47:51)) %>%
+  filter(!is.na(Submodule1)) %>% #filter for only things with KEGG mod IDs
+  group_by(Submodule1) %>%
+  summarise(across(where(is.numeric), sum,  na.rm=TRUE)) %>% #sum module assignment relative abundances
+  left_join(kegg_simple, by = "Submodule1") %>%
+  filter(!if_all(where(is.numeric), ~ . == 0)) %>%
+  mutate(across(where(is.numeric), ~ . + 0.1)) %>% #add pseudogene count of 0.1 to all to avoid inf/-inf in lfc
+  mutate(
+      dsw_insitu_lfc = log2(DSW/insitu_7_26),
+      plus_N_insitu_lfc = log2(plus_N/insitu_7_26),
+      minus_P_insitu_lfc = log2(minus_P/insitu_7_26),
+    insitu_after_before = log2(insitu_after/insitu_before)
+  ) %>%
+  select(-c(2:7))
+
+# Radar chart code
+## function below is from https://www.datanovia.com/en/blog/beautiful-radar-chart-in-r-using-fmsb-and-ggplot-packages/
+
+create_beautiful_radarchart <- function(data, color = "#00AFBB", 
+                                        vlabels = colnames(data), vlcex = 0.7,
+                                        caxislabels = NULL, title = NULL, ...){
+  radarchart(
+    data, axistype = 1,
+    # Customize the polygon
+    pcol = color, pfcol = scales::alpha(color, 0.5), plwd = 2, plty = 1,
+    # Customize the grid
+    cglcol = "grey", cglty = 1, cglwd = 0.8,
+    # Customize the axis
+    axislabcol = "grey", 
+    # Variable labels
+    vlcex = vlcex, vlabels = vlabels,
+    caxislabels = caxislabels, title = title, ...
+  )
+}
+
+radar_cyl_df <- cylindro_greedy_sum %>%
+  arrange(Submodule2) #arrange alphabetically by large categories
+  select(-c(1:2)) 
+  mutate(Max = 10, Min = -3, .before = dsw_insitu_lfc) %>%
+  as.matrix() %>%
+  t() %>%
+  as.data.frame() %>%
+  rename_with(~ sub("^.", "", .), starts_with("V")) #remove the extra 'X' from data columns
+
+cols_cyl <- c("#B9D8C2", "#335111", "#A5B452", "black")
+
+## radar plot for cylindro greedy, summed tpms for submodules lfc against in situ
+op <- par(mar = c(2, 2, 2, 2))
+radarchart(
+  radar_cyl_df[,c(1,45:2)],
+  axistype = 1,
+  pcol  = cols_cyl,
+  pfcol = scales::alpha(cols_cyl, 0.1),
+  plwd  = 3, plty = 1,
+  cglcol = "grey", cglty = 1, cglwd = 0.8,
+  axislabcol = "black", caxislabels = c(-4,0,4,8,12),
+  vlcex = 1.2, calcex= 1.2
+)
+legend(
+  x = "bottom", legend = rownames(radar_cyl_df)[-(1:2)], horiz = TRUE,
+  bty = "n", pch = 20, col = cols_cyl,
+  text.col = "black", cex = 1, pt.cex = 1.5
+)
+
+```
+
+# sample heatmap code for Cylindortheca KEGG IDs of interest
+```{r}
+#read in Table S4 from the Supplemental tables
+setwd("your_local_path")
+cylindro_all <- read.csv()
+cylindro_all <- cylindro_all[, -c(1)]
+
+cylindro_all_2 <- cylindro_all %>%
+      filter(evalue < 1e-50) %>%
+      mutate(KEGG_ko = case_when(grepl("carbamoyl-phosphate synthase", Description) ~ "ko:K01948",
+                                 grepl("Silicon transporter", Description) ~ "Silicon transporter",
+                                 grepl("Flavodoxin", Description) ~ "Flavodoxin",
+                                                                  TRUE ~ KEGG_ko )) %>%
+  rename_with(~ sub("^.", "", .), starts_with("X")) %>% #remove the extra 'X' from data columns
+      dplyr::mutate("7_26_2pm" = rowMeans(.[, 50:52], na.rm = T)) %>%
+      dplyr::mutate("7_27_2pm" = rowMeans(.[, 18:20], na.rm = T)) %>%
+      dplyr::mutate("7_28_2pm" = rowMeans(.[, 26:28], na.rm = T)) %>%
+      dplyr::mutate("7_29_2pm" = rowMeans(.[, 34:36], na.rm = T)) %>%
+      dplyr::mutate("8_1_2pm" = rowMeans(.[, 41:43], na.rm = T)) %>%
+      dplyr::mutate("8_2_2pm" = rowMeans(.[, 44:46], na.rm = T)) %>%
+      dplyr::mutate("8_3_2pm" = rowMeans(.[, 47:49], na.rm = T)) %>%
+  mutate(
+    control  = rowMeans(dplyr::select(., starts_with("control")), na.rm = TRUE),
+    minus_P  = rowMeans(dplyr::select(., starts_with("minus_P")), na.rm = TRUE),
+    minus_N  = rowMeans(dplyr::select(., starts_with("minus_N")), na.rm = TRUE),
+    plus_P   = rowMeans(dplyr::select(., starts_with("plus_P")), na.rm = TRUE),
+    plus_N   = rowMeans(dplyr::select(., starts_with("plus_N")), na.rm = TRUE),
+    DSW      = rowMeans(dplyr::select(., starts_with("DSW")), na.rm = TRUE)
+  ) %>%
+  dplyr::select(-c(2:13,18:20,26:28,34:36,41:79,83:104)) %>%
+  relocate("7_26_2pm", .after = 1) %>%
+  relocate("7_27_2pm", .after = "10am_7_27") %>%
+  relocate("7_28_2pm", .after = "10am_7_28") %>%
+  relocate("7_29_2pm", .after = "10am_7_29") %>%
+  relocate(c("8_1_2pm","8_2_2pm","8_3_2pm"), .after = "6am_7_30") %>%
+  relocate(c("KEGG_ko","KEGG_Pathway","KEGG_Module"), .after = "DSW") %>%
+  mutate(across(where(is.character), ~na_if(., "-"))) %>% #change all '-' to NA
+  dplyr::select(c(1:2,7,13,19,24:26,28,31:35))
+
+ ### combine tpms by kegg number
+cylindro_keggs <- cylindro_all_2 %>%
+  filter(!is.na(KEGG_ko)) %>% #filter for only things with KEGG IDs
+  separate_rows(KEGG_ko, sep = ",") %>% #duplicate rows with multiple KEGG module IDs -- gives you 5018 rows
+  group_by(KEGG_ko) %>%  #group by keggID
+  summarise(across(where(is.numeric), sum)) %>% # sum kegg ko assignment tpms
+  ungroup()
+
+# list of KEGG ko IDs to search for
+keggs_all <- c(
+            # transporters
+           ,"ko:K13576" #amino acid transporter
+           ,"ko:K14997" #amino acid transporter-- these two are always the same contig, could just choose one
+           ,"Silicon transporter" #Silicon transporter
+           ,"ko:K14683" #Na/Pi cotransporter
+           ,"ko:K14713" #zinc transporer
+           ,"ko:K14709" #zinc transporter
+           ,"ko:K00521" #ferric reductase, iron stress marker
+           ,"Flavodoxin"
+           ,"Vacuolar iron transporter" #Vacuolar iron transporter
+          # N genes
+           ,"ko:K02575" #cellular response to nitrate, nitrate/nitrite transporters
+           ,"ko:K02575_26029" # nitrate transporter HNS
+           ,"ko:K03320" #ammonium transporter
+           ,"ko:K03320_AMT1_1" #ammonium transporter AMT1_1
+           ,"ko:K10534" #nitrate reductase (nitrate assimilation)
+           ,"ko:K00392" #nitrite sulfite reductase (nitrate assimilation)
+           ,"ko:K00459" #nitronate monooxygenase (nitrite production)
+           ,"ko:K00926" #carbamoyl phosphate catabolic process 
+           ,"ko:K01915" #glutamine synthetase (ammonium assimilation)
+           ,"ko:K00266" #glutamate synthetase NADPH (ammonium assimilation)
+           ,"ko:K00264" #glutamate synthetase NADH (ammonium assimilation)
+           ,"ko:K00284" #glutamate synthetase ferredoxin (ammonium assimilation)
+           ,"ko:K15371" #glutamate dehydrogenase NAD+ (ammonium assimilation)
+           ,"ko:K00262" #glutamate dehydrogenase NADP+  (ammonium assimilation)
+           ,"ko:K00392" #sulfite reductase-- putative also nitrate reductase? (sulfite reductase based on blast)
+           ,"ko:K01948" #carbamoyl-phosphate synthase (was only pfam annotated, hand-annotated the KEGG ID on this one)
+           ,"ko:K01672" #carbonic anhydrase
+)
+
+cylindro_keggs_all_sub <- cylindro_keggs %>%
+  filter(grepl(paste(keggs_all, collapse='|'), KEGG_ko)) %>% #subset selected keggs
+  column_to_rownames(var = 'KEGG_ko') %>%
+  relocate(plus_N, .before = minus_P) %>%
+  dplyr::select(c(1,8:10)) #use this line to keep ONLY amendments
+  #dplyr::select(-c(8:10)) #use this instead to remove amendments, so you can normalize without them
+
+cylindro_keggs_all_sub[1:4] <- lapply(cylindro_keggs_all_sub[1:4], log10) # log transform data columns. Change 4 to 7 depending on which 'select' command
+cylindro_keggs_all_sub[cylindro_keggs_all_sub == "-Inf"] <- 0 #remove any -inf generated by log transformation
+
+# z score function
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+
+cylindro_keggs_all_sub_z <- t(apply(cylindro_keggs_all_sub[1:4], 1, cal_z_score)) # norm by z-score
+
+labs.row <- rownames(cylindro_keggs_all_sub) # create a vector of row names
+
+# kegg nitrogen heatmap, columns are normalied to the sum of all kegg identified contigs, then z score
+my_kegg_map <- pheatmap(cylindro_keggs_all_sub_z, 
+                      color=colorRampPalette(c("#f0f3ea","#d2dabf","#b4c294","#95a969","#77903e","#688428",
+                                               "#536a20","#3e4f18","#2a3510","#151a08"))(100), 
+                      legend=T,
+                      cluster_rows = TRUE,
+                      cluster_cols = F, 
+                      show_rownames = TRUE,
+                      na_col="white", 
+                      fontsize=12,
+                      labels_row = labs.row)
+
+```
+
